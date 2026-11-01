@@ -6,6 +6,7 @@
 //
 
 #import <Foundation/NSURLProtocol.h>
+#import "NSURLRequestInternal.h"
 #import "NSURLProtocolInternal.h"
 #import <Foundation/NSObjectInternal.h>
 #import <Foundation/NSURLRequest.h>
@@ -123,17 +124,17 @@ static NSMutableArray *sRegisteredClasses = nil;
 
 + (id)propertyForKey:(NSString *)key inRequest:(NSURLRequest *)request
 {
-    return objc_getAssociatedObject(request, key);
+    return [request _protocolPropertyForKey:key];
 }
 
 + (void)setProperty:(id)value forKey:(NSString *)key inRequest:(NSMutableURLRequest *)request
 {
-    objc_setAssociatedObject(request, key, value, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [request _setProtocolProperty:value forKey:key];
 }
 
 + (void)removePropertyForKey:(NSString *)key inRequest:(NSMutableURLRequest *)request
 {
-    objc_setAssociatedObject(request, key, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [request _setProtocolProperty:nil forKey:key];
 }
 
 + (BOOL)registerClass:(Class)protocolClass

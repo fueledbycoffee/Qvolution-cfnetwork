@@ -16,6 +16,7 @@
 - (void)dealloc
 {
     CFRelease(request);
+    [protocolProperties release];
     [super dealloc];
 }
 
@@ -63,8 +64,66 @@ static NSTimeInterval defaultTimeout = 60.0;
     {
         _internal = [[NSURLRequestInternal alloc] init];
         _internal->request = (CFURLRequestRef)CFRetain(req);
+        _internal->allowsExpensiveNetworkAccess = YES;
+        _internal->allowsConstrainedNetworkAccess = YES;
     }
     return self;
+}
+
+static void _NSURLRequestCopyFlags(NSURLRequestInternal *from, NSURLRequestInternal *to)
+{
+    to->assumesHTTP3Capable = from->assumesHTTP3Capable;
+    to->allowsExpensiveNetworkAccess = from->allowsExpensiveNetworkAccess;
+    to->allowsConstrainedNetworkAccess = from->allowsConstrainedNetworkAccess;
+    to->requiresDNSSECValidation = from->requiresDNSSECValidation;
+    [to->protocolProperties release];
+    to->protocolProperties = [from->protocolProperties mutableCopy];
+}
+
+/* NSURLProtocol properties belong to the request: they are found by key
+ * value and travel with copies of it (a task's originalRequest included). */
+- (id)_protocolPropertyForKey:(NSString *)key
+{
+    if (key == nil)
+        return nil;
+    @synchronized (_internal) {
+        return [[[_internal->protocolProperties objectForKey:key] retain] autorelease];
+    }
+}
+
+- (void)_setProtocolProperty:(id)value forKey:(NSString *)key
+{
+    if (key == nil)
+        return;
+    @synchronized (_internal) {
+        if (value == nil) {
+            [_internal->protocolProperties removeObjectForKey:key];
+            return;
+        }
+        if (_internal->protocolProperties == nil)
+            _internal->protocolProperties = [[NSMutableDictionary alloc] init];
+        [_internal->protocolProperties setObject:value forKey:key];
+    }
+}
+
+- (BOOL)assumesHTTP3Capable
+{
+    return _internal->assumesHTTP3Capable;
+}
+
+- (BOOL)allowsExpensiveNetworkAccess
+{
+    return _internal->allowsExpensiveNetworkAccess;
+}
+
+- (BOOL)allowsConstrainedNetworkAccess
+{
+    return _internal->allowsConstrainedNetworkAccess;
+}
+
+- (BOOL)requiresDNSSECValidation
+{
+    return _internal->requiresDNSSECValidation;
 }
 
 - (id)initWithURL:(NSURL *)URL cachePolicy:(NSURLRequestCachePolicy)cachePolicy timeoutInterval:(NSTimeInterval)timeoutInterval
@@ -121,12 +180,17 @@ static NSTimeInterval defaultTimeout = 60.0;
     CFURLRequestRef req = CFURLRequestCreateCopy(kCFAllocatorDefault, _internal->request);
     NSURLRequest *copy = [[NSURLRequest alloc] _initWithCFURLRequest:req];
     CFRelease(req);
+    if (copy != nil)
+        _NSURLRequestCopyFlags(_internal, copy->_internal);
     return copy;
 }
 
 - (id)mutableCopyWithZone:(NSZone *)zone
 {
-    return [[NSMutableURLRequest alloc] _initWithCFURLRequest:_internal->request];
+    NSMutableURLRequest *copy = [[NSMutableURLRequest alloc] _initWithCFURLRequest:_internal->request];
+    if (copy != nil)
+        _NSURLRequestCopyFlags(_internal, ((NSURLRequest *)copy)->_internal);
+    return copy;
 }
 
 - (NSString *)debugDescription
@@ -218,6 +282,26 @@ static NSTimeInterval defaultTimeout = 60.0;
 - (void)setAllowsCellularAccess:(BOOL)allow
 {
     CFURLRequestSetAllowsCellularAccess((CFMutableURLRequestRef)[self _CFURLRequest], allow);
+}
+
+- (void)setAssumesHTTP3Capable:(BOOL)value
+{
+    _internal->assumesHTTP3Capable = value;
+}
+
+- (void)setAllowsExpensiveNetworkAccess:(BOOL)value
+{
+    _internal->allowsExpensiveNetworkAccess = value;
+}
+
+- (void)setAllowsConstrainedNetworkAccess:(BOOL)value
+{
+    _internal->allowsConstrainedNetworkAccess = value;
+}
+
+- (void)setRequiresDNSSECValidation:(BOOL)value
+{
+    _internal->requiresDNSSECValidation = value;
 }
 
 @end
