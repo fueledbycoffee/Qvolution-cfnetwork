@@ -77,6 +77,7 @@ set(cfnetwork_sources
 	Utils/CFRuntimeUtils.c
 	FTP/CFFTPStream.c
 	#NetDiagnostics/CFNetDiagnosticsProtocolUser.c
+	NetDiagnostics/CFNetDiagnosticsUnsupported.c
 	#NetDiagnostics/CFNetDiagnostics.c
 	#NetDiagnostics/CFNetDiagnosticPing.c
 	CFNetwork.c
