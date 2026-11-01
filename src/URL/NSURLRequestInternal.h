@@ -11,6 +11,11 @@ CF_PRIVATE
 @interface NSURLRequestInternal : NSObject {
 @public
     CFURLRequestRef request;
+    // Request properties CFURLRequest does not carry; copied with the request.
+    BOOL assumesHTTP3Capable;
+    BOOL allowsExpensiveNetworkAccess;
+    BOOL allowsConstrainedNetworkAccess;
+    BOOL requiresDNSSECValidation;
 }
 
 - (void)dealloc;
