@@ -16,6 +16,7 @@
 - (void)dealloc
 {
     CFRelease(request);
+    [protocolProperties release];
     [super dealloc];
 }
 
@@ -75,6 +76,34 @@ static void _NSURLRequestCopyFlags(NSURLRequestInternal *from, NSURLRequestInter
     to->allowsExpensiveNetworkAccess = from->allowsExpensiveNetworkAccess;
     to->allowsConstrainedNetworkAccess = from->allowsConstrainedNetworkAccess;
     to->requiresDNSSECValidation = from->requiresDNSSECValidation;
+    [to->protocolProperties release];
+    to->protocolProperties = [from->protocolProperties mutableCopy];
+}
+
+/* NSURLProtocol properties belong to the request: they are found by key
+ * value and travel with copies of it (a task's originalRequest included). */
+- (id)_protocolPropertyForKey:(NSString *)key
+{
+    if (key == nil)
+        return nil;
+    @synchronized (_internal) {
+        return [[[_internal->protocolProperties objectForKey:key] retain] autorelease];
+    }
+}
+
+- (void)_setProtocolProperty:(id)value forKey:(NSString *)key
+{
+    if (key == nil)
+        return;
+    @synchronized (_internal) {
+        if (value == nil) {
+            [_internal->protocolProperties removeObjectForKey:key];
+            return;
+        }
+        if (_internal->protocolProperties == nil)
+            _internal->protocolProperties = [[NSMutableDictionary alloc] init];
+        [_internal->protocolProperties setObject:value forKey:key];
+    }
 }
 
 - (BOOL)assumesHTTP3Capable
