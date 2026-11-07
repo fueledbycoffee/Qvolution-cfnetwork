@@ -13,11 +13,14 @@
 #import "NSCFURLSession.h"
 #import "NSURLSessionCurl.h"
 #import "NSURLRequestInternal.h"
+#import <CFNetwork/CFNSURLConnection.h>
 
 #import <Foundation/NSArray.h>
 #import <Foundation/NSBundle.h>
 #import <Foundation/NSCharacterSet.h>
 #import <Foundation/NSData.h>
+#import <Foundation/NSDate.h>
+#import <Foundation/NSDateInterval.h>
 #import <Foundation/NSDictionary.h>
 #import <Foundation/NSError.h>
 #import <Foundation/NSException.h>
@@ -40,6 +43,18 @@ static const NSUInteger kMaximumRedirects = 20;
 
 typedef void (^DataTaskCompletionHandler)(NSData *data, NSURLResponse *response, NSError *error);
 
+@protocol _NSURLSessionMetricsDelegate
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didFinishCollectingMetrics:(NSURLSessionTaskMetrics *)metrics;
+@end
+
+// Apple sends the metrics before URLSession:task:didCompleteWithError:, whether or not the task
+// has a completion handler. Alamofire finishes a request only once both have arrived.
+static void deliverMetrics(__NSCFURLSession *session, NSURLSessionTask *task, NSURLSessionTaskMetrics *metrics)
+{
+    id delegate = [session _delegateRespondingTo:@selector(URLSession:task:didFinishCollectingMetrics:)];
+    [(id <_NSURLSessionMetricsDelegate>)delegate URLSession:session task:task didFinishCollectingMetrics:metrics];
+}
+
 @interface __NSCFURLSession ()
 - (NSURLSessionConfiguration *)_configurationNoCopy;
 - (id)_delegateRespondingTo:(SEL)selector;
@@ -48,6 +63,7 @@ typedef void (^DataTaskCompletionHandler)(NSData *data, NSURLResponse *response,
 @end
 
 @interface __NSCFURLSessionDataTask () <_NSURLSessionCurlTransfer>
+- (void)_setBodyObserver:(void (^)(int64_t received, int64_t expected))observer;
 - (void)_receivedHeaderLine:(const char *)bytes length:(size_t)length;
 - (size_t)_receivedBody:(const char *)bytes length:(size_t)length;
 - (void)_uploadedBytes:(int64_t)uploaded;
@@ -480,6 +496,7 @@ static BOOL isSameOrigin(NSURL *a, NSURL *b)
     [_pendingHTTPVersion release];
     [_pendingHeaderLines release];
     [_receivedData release];
+    [_bodyObserver release];
     [_redirectBody release];
     [_redirectRequest release];
     [_redirectResponse release];
@@ -555,6 +572,8 @@ LOCKED_GETTER(int64_t, countOfBytesExpectedToReceive, _countOfBytesExpectedToRec
         _state = NSURLSessionTaskStateRunning;
         start = !_started;
         _started = YES;
+        if (start)
+            _startTime = CFAbsoluteTimeGetCurrent();
     }
 
     NSString *loadError = nil;
@@ -1014,11 +1033,33 @@ LOCKED_GETTER(int64_t, countOfBytesExpectedToReceive, _countOfBytesExpectedToRec
         [self _finishWithError:[self _errorWithCode:NSURLErrorUnknown description:[NSString stringWithFormat:@"response disposition %ld is not supported yet", (long)disposition]]];
 }
 
+- (void)_setBodyObserver:(void (^)(int64_t received, int64_t expected))observer
+{
+    void (^old)(int64_t, int64_t);
+    void (^newCopy)(int64_t, int64_t) = [observer copy];
+    @synchronized(self)
+    {
+        old = _bodyObserver;
+        _bodyObserver = newCopy;
+    }
+    [old release];
+}
+
 - (void)_deliverData:(NSData *)data
 {
+    int64_t received, expected;
+    void (^observer)(int64_t, int64_t) = nil;
     @synchronized(self)
     {
         _countOfBytesReceived += [data length];
+        received = _countOfBytesReceived;
+        expected = _countOfBytesExpectedToReceive;
+        observer = [_bodyObserver retain];
+    }
+    if (observer != nil)
+    {
+        observer(received, expected);
+        [observer release];
     }
     if (_completionHandler != nil)
     {
@@ -1187,8 +1228,11 @@ LOCKED_GETTER(int64_t, countOfBytesExpectedToReceive, _countOfBytesExpectedToRec
         data = _receivedData != nil ? [[_receivedData copy] autorelease] : [NSData data];
     NSURLResponse *response = [self response];
     __NSCFURLSession *session = _session;
+    NSURLSessionTaskMetrics *metrics = _metricsReportedByOwner ? nil : [self _metrics];
     [session _addDelegateBlock:^{
         [self retain];
+        if (metrics != nil)
+            deliverMetrics(session, self, metrics);
         if (_completionHandler != nil)
         {
             void (^handler)(NSData *data, NSURLResponse *response, NSError *error) = [[_completionHandler retain] autorelease];
@@ -1204,6 +1248,25 @@ LOCKED_GETTER(int64_t, countOfBytesExpectedToReceive, _countOfBytesExpectedToRec
         [session _taskDidFinish:self];
         [self autorelease];
     }];
+}
+
+- (NSURLSessionTaskMetrics *)_metrics
+{
+    CFAbsoluteTime start, end = CFAbsoluteTimeGetCurrent();
+    NSUInteger redirects;
+    @synchronized(self)
+    {
+        start = _started ? _startTime : end;
+        redirects = _redirectCount;
+    }
+    NSDateInterval *interval = [[[NSDateInterval alloc] initWithStartDate:[NSDate dateWithTimeIntervalSinceReferenceDate:start]
+                                                                   endDate:[NSDate dateWithTimeIntervalSinceReferenceDate:end]] autorelease];
+    return [[[NSURLSessionTaskMetrics alloc] _initWithTaskInterval:interval redirectCount:redirects] autorelease];
+}
+
+- (void)_setMetricsReportedByOwner
+{
+    _metricsReportedByOwner = YES;
 }
 
 @end
@@ -1226,12 +1289,36 @@ LOCKED_GETTER(int64_t, countOfBytesExpectedToReceive, _countOfBytesExpectedToRec
             [self _handleInnerCompletionWithData:data response:response error:error];
             [self autorelease];
         }] retain];
+        [(__NSCFURLSessionDataTask *)_innerTask _setMetricsReportedByOwner];
+        /* The delegate hears how far the download is (Feather's progress ring); at most
+           ten times a second, and always the last piece. */
+        if (_completionHandler == nil) {
+            __block int64_t reported = 0;
+            __block CFAbsoluteTime reportedAt = 0;
+            [(__NSCFURLSessionDataTask *)_innerTask _setBodyObserver:^(int64_t received, int64_t expected) {
+                CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+                if (received != expected && now - reportedAt < 0.1)
+                    return;
+                id delegate = [session _delegateRespondingTo:@selector(URLSession:downloadTask:didWriteData:totalBytesWritten:totalBytesExpectedToWrite:)];
+                if (delegate == nil)
+                    return;
+                int64_t written = received - reported;
+                reported = received;
+                reportedAt = now;
+                [session _addDelegateBlock:^{
+                    [delegate URLSession:session downloadTask:self didWriteData:written totalBytesWritten:received
+                        totalBytesExpectedToWrite:expected >= 0 ? expected : NSURLSessionTransferSizeUnknown];
+                }];
+            }];
+        }
     }
     return self;
 }
 
 - (void)_handleInnerCompletionWithData:(NSData *)data response:(NSURLResponse *)response error:(NSError *)error
 {
+    /* It holds this task: let go of it. */
+    [(__NSCFURLSessionDataTask *)_innerTask _setBodyObserver:nil];
     _response = [response retain];
     _error = [error retain];
     _state = NSURLSessionTaskStateCompleted;
@@ -1249,6 +1336,7 @@ LOCKED_GETTER(int64_t, countOfBytesExpectedToReceive, _countOfBytesExpectedToRec
     }
 
     __NSCFURLSession *session = _session;
+    deliverMetrics(session, self, [(__NSCFURLSessionDataTask *)_innerTask _metrics]);
     if (_completionHandler != nil) {
         DownloadTaskCompletionHandler handler = [[_completionHandler retain] autorelease];
         [_completionHandler release];
